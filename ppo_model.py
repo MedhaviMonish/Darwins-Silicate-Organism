@@ -9,14 +9,14 @@ from advantage import get_gaes
 class PPO(Model):
     def __init__ (self, input_dim, action_dim, action_type:ActionType, env:Env):
         super(PPO, self).__init__()
-        self.learning_rate = 0.001
-        self.gamma = 0.99
-        self.lamda = 0.95
+        self.learning_rate = 0.0003
+        self.gamma = 0.95
+        self.lamda = 0.9
         self.ppo_eps = 0.2
         self.normalize = True
         self.epoch = 3
-        self.rollout = 1024
-        self.batch_size = 512
+        self.rollout = 256
+        self.batch_size = 128
 
         self.input_dim = input_dim
         self.action_dim = action_dim
@@ -80,11 +80,11 @@ class PPO(Model):
             np.random.shuffle(sample_range)
             sample_idx = sample_range[:self.batch_size]
 
-            batch_state = [observations[i] for i in sample_idx]
-            batch_action = [actions[i] for i in sample_idx]
-            batch_target = [target[i] for i in sample_idx]
-            batch_adv = [adv[i] for i in sample_idx]
-            batch_old_policy = [old_policy[i] for i in sample_idx]
+            batch_state = tf.gather(observations, sample_idx)
+            batch_action = tf.gather(actions, sample_idx)
+            batch_target = tf.gather(target, sample_idx)
+            batch_adv = tf.gather(adv, sample_idx)
+            batch_old_policy = tf.gather(old_policy, sample_idx)
 
             ppo_variable = self.trainable_variables
             with tf.GradientTape() as tape:
