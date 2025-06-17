@@ -14,6 +14,11 @@ An artificial lifeform — forged from circuits, driven by survival.
 
 ## Status
 🧪 In active development  
+- Added the Base PPO model
+- Need to work on creating all the methods that maybe required, like - save, logg, plot chart of training.
+- Curiosity
+- Memory
+- And last is Hindsight
 
 ## Goals
 - Simulate the emergence of intelligent behavior under constraint
