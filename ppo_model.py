@@ -34,14 +34,15 @@ class PPOModel(Model):
         value_logits = self.value_model(base_logits)
         if self.action_type == ActionType.DISCRETE:
             action_logits = self.action_model(base_logits)
-            action_logits = tf.nn.softmax(action_logits)
+            log_probs = tf.nn.log_softmax(action_logits)
         else:
             raise NotImplementedError("Only DISCRETE action space is implemented.")
-        return action_logits, value_logits
+
+        return log_probs, value_logits
 
     def sample_action(
         self, observation_logits: tf.Tensor
-    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         base_logits = self.base_model(observation_logits)
         value_logits = self.value_model(base_logits)
 
@@ -49,8 +50,8 @@ class PPOModel(Model):
             action_logits = self.action_model(base_logits)
             action_probs = tf.nn.softmax(action_logits)
             log_probs = tf.math.log(action_probs + 1e-8)
-            action = tf.random.categorical(log_probs, num_samples=1)
+            action = tf.random.categorical(action_logits, num_samples=1)
         else:
             raise NotImplementedError("Only DISCRETE action space is implemented.")
 
-        return tf.squeeze(action, axis=-1), action_probs, value_logits
+        return tf.squeeze(action, axis=-1), action_probs, log_probs, value_logits

@@ -36,14 +36,24 @@ class PPOTrainer:
 
             while not done:
                 obs_tensor = tf.convert_to_tensor([obs], dtype=tf.float32)
-                action, logits, value = self.model.sample_action(obs_tensor)
+                action, action_probs, log_probs, value = self.model.sample_action(
+                    obs_tensor
+                )
                 action = action.numpy()
 
                 next_obs, reward, terminated, truncated, _ = self.env.step(action[0])
                 done_flag = int(terminated or truncated)
 
                 # Store transition
-                self.buffer.add(obs, action, reward, done_flag, next_obs, logits, value)
+                self.buffer.add(
+                    obs,
+                    action,
+                    reward,
+                    done_flag,
+                    next_obs,
+                    log_probs[0].numpy(),
+                    value.numpy()[0],
+                )
 
                 obs = next_obs
                 total_timesteps += 1
@@ -65,20 +75,18 @@ class PPOTrainer:
         old_log_probs = tf.convert_to_tensor(records["log_probs"], dtype=tf.float32)
         values = tf.convert_to_tensor(records["values"], dtype=tf.float32)
 
-        # Get next state value estimates
+        # Compute values for next state
         _, next_values = self.model(next_states)
         values = tf.squeeze(values, axis=-1)
         next_values = tf.squeeze(next_values, axis=-1)
 
-        # Compute advantage and TD targets
+        # GAE: compute advantages and TD targets
         advantages, targets = self.compute_gae(rewards, dones, values, next_values)
 
-        # Training loop
         for _ in range(self.epoch):
             indices = np.arange(self.rollout)
             np.random.shuffle(indices)
             batch_idx = indices[: self.batch_size]
-
             batch_states = tf.gather(states, batch_idx)
             batch_actions = tf.gather(actions, batch_idx)
             batch_advantages = tf.gather(advantages, batch_idx)
@@ -86,49 +94,65 @@ class PPOTrainer:
             batch_old_log_probs = tf.gather(old_log_probs, batch_idx)
 
             with tf.GradientTape() as tape:
-                policy_logits, predicted_values = self.model(batch_states)
+                log_probs, predicted_values = self.model(batch_states)
                 predicted_values = tf.squeeze(predicted_values, axis=-1)
-
-                # Entropy bonus for exploration
+                # Entropy bonus (based on log_probs = log_softmax)
+                probs = tf.exp(log_probs)
                 entropy = (
-                    tf.reduce_mean(-policy_logits * tf.math.log(policy_logits + 1e-8))
-                    * 0.1
+                    -tf.reduce_mean(tf.reduce_sum(probs * log_probs, axis=1)) * 0.1
                 )
 
-                # Log-probs for current policy
-                onehot = tf.one_hot(batch_actions, self.action_dim)
-                selected_probs = tf.reduce_sum(policy_logits * onehot, axis=1)
-                selected_old_probs = tf.reduce_sum(batch_old_log_probs * onehot, axis=1)
+                # Flatten actions to shape [128]
+                batch_actions_flat = tf.squeeze(
+                    batch_actions, axis=-1
+                )  # or tf.reshape(..., [-1])
 
-                log_pi = tf.math.log(selected_probs + 1e-8)
-                log_old_pi = tf.math.log(selected_old_probs + 1e-8)
+                # Use tf.gather on each row (i.e., gather index from axis=1 per row)
+                # Result shape: [128], contains log prob of taken action per sample
+                selected_log_probs = tf.reduce_sum(
+                    log_probs * tf.one_hot(batch_actions_flat, self.action_dim), axis=1
+                )
+                selected_old_log_probs = tf.reduce_sum(
+                    batch_old_log_probs
+                    * tf.one_hot(batch_actions_flat, self.action_dim),
+                    axis=1,
+                )
 
-                # PPO clipped loss
-                ratio = tf.exp(log_pi - log_old_pi)
-                clipped = tf.clip_by_value(ratio, 1 - self.ppo_eps, 1 + self.ppo_eps)
+                # PPO clipped objective
+                ratio = tf.exp(selected_log_probs - selected_old_log_probs)
+                clipped_ratio = tf.clip_by_value(
+                    ratio, 1 - self.ppo_eps, 1 + self.ppo_eps
+                )
+
                 surrogate = tf.minimum(
-                    ratio * batch_advantages, clipped * batch_advantages
+                    ratio * batch_advantages, clipped_ratio * batch_advantages
                 )
+
                 policy_loss = -tf.reduce_mean(surrogate) + entropy
 
                 # Value function loss
                 value_loss = tf.reduce_mean(tf.square(batch_targets - predicted_values))
 
-                # Total loss
                 total_loss = policy_loss + value_loss
 
-            # Apply gradients
+            # Optimize
             grads = tape.gradient(total_loss, self.model.trainable_variables)
             self.opt.apply_gradients(zip(grads, self.model.trainable_variables))
 
-            self.logger.log_scalar("value_loss", value_loss.numpy())
-            self.logger.log_scalar("policy_loss", policy_loss.numpy())
+            # ✅ Logging
+            self.logger.log_scalar("loss/total", total_loss.numpy())
+            self.logger.log_scalar("loss/policy", policy_loss.numpy())
+            self.logger.log_scalar("loss/value", value_loss.numpy())
             self.logger.log_scalar("entropy", entropy.numpy())
-            self.logger.log_scalar("adv_mean", tf.reduce_mean(batch_advantages).numpy())
             self.logger.log_scalar(
-                "adv_std", tf.math.reduce_std(batch_advantages).numpy()
+                "advantage/mean", tf.reduce_mean(batch_advantages).numpy()
             )
-            self.logger.log_scalar("log_prob_std", tf.math.reduce_std(log_pi).numpy())
+            self.logger.log_scalar(
+                "advantage/std", tf.math.reduce_std(batch_advantages).numpy()
+            )
+            self.logger.log_scalar(
+                "log_prob/std", tf.math.reduce_std(selected_log_probs).numpy()
+            )
 
     def compute_gae(self, rewards, dones, values, next_values):
         return get_gaes(
